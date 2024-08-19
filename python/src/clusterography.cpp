@@ -73,12 +73,31 @@ clust::IntegralCluster make_cluster_from_list(
   return cluster;
 }
 
+struct FilterBySublatticeIndex {
+  FilterBySublatticeIndex(
+      std::shared_ptr<xtal::BasicStructure const> const &prim,
+      std::set<Index> included_sublattices)
+      : m_prim(prim), m_included_sublattices(sublattice_indices) {}
+
+  bool operator()(xtal::Site const &site) const {
+    xtal::UnitCellCoord unitcellcoord = xtal::UnitCellCoord::from_coordinate(
+        *m_prim, site.coordinate(), m_prim->lattice().tol())
+        Index sublattice_index = unitcellcoord.sublattice();
+    return m_included_sublattices.find(sublattice_index) !=
+           m_sublattice_indices.end();
+  }
+
+  std::shared_ptr<xtal::BasicStructure const> m_prim;
+  std::set<Index> m_included_sublattices;
+};
+
 clust::ClusterSpecs make_cluster_specs(
     std::shared_ptr<xtal::BasicStructure const> const &prim,
     std::shared_ptr<clust::SymGroup const> const &generating_group,
     std::vector<double> max_length,
     std::vector<clust::IntegralClusterOrbitGenerator> custom_generators,
     std::string site_filter_method,
+    std::optional<std::set<Index>> included_sublattices,
     std::optional<clust::IntegralCluster> phenomenal,
     bool include_phenomenal_sites, std::vector<double> cutoff_radius) {
   clust::ClusterSpecs cluster_specs(prim, generating_group);
@@ -91,6 +110,9 @@ clust::ClusterSpecs make_cluster_specs(
     cluster_specs.site_filter = clust::alloy_sites_filter;
   } else if (site_filter_method == "all_sites") {
     cluster_specs.site_filter = clust::all_sites_filter;
+  } else if (site_filter_method == "selected_sites") {
+    cluster_specs.site_filter =
+        FilterBySublatticeIndex(prim, included_sublattices);
   } else {
     std::stringstream ss;
     ss << "Error in make_cluster_specs: site_filter_method="
