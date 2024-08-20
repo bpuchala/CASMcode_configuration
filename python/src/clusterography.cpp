@@ -1,4 +1,5 @@
 #include <pybind11/eigen.h>
+#include <pybind11/functional.h>
 #include <pybind11/iostream.h>
 #include <pybind11/operators.h>
 #include <pybind11/pybind11.h>
@@ -73,23 +74,99 @@ clust::IntegralCluster make_cluster_from_list(
   return cluster;
 }
 
-struct FilterBySublatticeIndex {
-  FilterBySublatticeIndex(
-      std::shared_ptr<xtal::BasicStructure const> const &prim,
-      std::set<Index> sublattice_indices)
-      : m_prim(prim), m_included_sublattices(sublattice_indices) {}
-
-  bool operator()(xtal::Site const &site) const {
-    xtal::UnitCellCoord unitcellcoord = xtal::UnitCellCoord::from_coordinate(
-        *m_prim, site, m_prim->lattice().tol());
-    Index sublattice_index = unitcellcoord.sublattice();
-    return m_included_sublattices.find(sublattice_index) !=
-           m_included_sublattices.end();
+/// \brief Make orbits of clusters, either periodic or local-cluster orbits,
+///     based on the ClusterSpecs
+std::vector<std::vector<clust::IntegralCluster>> make_orbits(
+    clust::ClusterSpecs const &cluster_specs) {
+  // construct
+  std::vector<std::set<clust::IntegralCluster>> _orbits;
+  if (cluster_specs.phenomenal.has_value()) {
+    // local clusters
+    auto symgroup_rep = sym_info::make_unitcellcoord_symgroup_rep(
+        cluster_specs.generating_group->element, *cluster_specs.prim);
+    _orbits = make_local_orbits(
+        cluster_specs.prim, symgroup_rep, cluster_specs.site_filter,
+        cluster_specs.max_length, cluster_specs.custom_generators,
+        cluster_specs.phenomenal.value(), cluster_specs.cutoff_radius,
+        cluster_specs.include_phenomenal_sites);
+  } else {
+    // prim periodic clusters
+    auto generating_group_unitcellcoord_symgroup_rep =
+        sym_info::make_unitcellcoord_symgroup_rep(
+            cluster_specs.generating_group->element, *cluster_specs.prim);
+    _orbits = make_prim_periodic_orbits(
+        cluster_specs.prim, generating_group_unitcellcoord_symgroup_rep,
+        cluster_specs.site_filter, cluster_specs.max_length,
+        cluster_specs.custom_generators);
   }
 
-  std::shared_ptr<xtal::BasicStructure const> m_prim;
-  std::set<Index> m_included_sublattices;
-};
+  // copy
+  std::vector<std::vector<clust::IntegralCluster>> orbits;
+  for (Index i = 0; i < _orbits.size(); ++i) {
+    orbits.emplace_back(_orbits[i].begin(), _orbits[i].end());
+  }
+  return orbits;
+}
+
+clust::ClusterSpecs make_custom_cluster_specs(
+    std::shared_ptr<xtal::BasicStructure const> const &prim,
+    std::shared_ptr<clust::SymGroup const> const &generating_group,
+    std::function<bool(xtal::UnitCellCoord)> site_filter_f,
+    std::vector<double> max_length,
+    std::vector<clust::IntegralClusterOrbitGenerator> custom_generators,
+    std::optional<clust::IntegralCluster> phenomenal,
+    bool include_phenomenal_sites, std::vector<double> cutoff_radius) {
+  // print errors and warnings to sys.stdout
+  py::scoped_ostream_redirect redirect;
+
+  // make ClusterSpecs with custom site_filter_f
+  clust::ClusterSpecs _cluster_specs(prim, generating_group);
+  _cluster_specs.max_length = max_length;
+  _cluster_specs.custom_generators = custom_generators;
+
+  if (!site_filter_f) {
+    throw std::runtime_error(
+        "Error in make_custom_cluster_specs: site_filter_f is not provided");
+  }
+
+  auto converted_site_filter_f = [=](xtal::Site const &site) -> bool {
+    xtal::UnitCellCoord unitcellcoord = xtal::UnitCellCoord::from_coordinate(
+        *prim, site, prim->lattice().tol());
+    bool value = site_filter_f(unitcellcoord);
+    return value;
+  };
+
+  _cluster_specs.site_filter = converted_site_filter_f;
+  _cluster_specs.site_filter_method = "custom";
+  _cluster_specs.phenomenal = phenomenal;
+  _cluster_specs.include_phenomenal_sites = include_phenomenal_sites;
+  _cluster_specs.cutoff_radius = cutoff_radius;
+
+  // make cluster orbits
+  std::vector<std::vector<clust::IntegralCluster>> orbits =
+      make_orbits(_cluster_specs);
+
+  // turn orbit prototypes in custom generators:
+  std::vector<clust::IntegralClusterOrbitGenerator> final_custom_generators;
+  Index i_orbit = 0;
+  for (auto const &orbit : orbits) {
+    final_custom_generators.push_back(
+        clust::IntegralClusterOrbitGenerator(orbit[0], false));
+    i_orbit += 1;
+  }
+
+  // create ClusterSpecs with entirely custom clusters
+  clust::ClusterSpecs cluster_specs(prim, generating_group);
+  cluster_specs.max_length = std::vector<double>({0.0, 0.0});
+  cluster_specs.custom_generators = final_custom_generators;
+
+  cluster_specs.site_filter = clust::dof_sites_filter();
+  cluster_specs.site_filter_method = "dof_sites";
+  cluster_specs.phenomenal = phenomenal;
+  cluster_specs.include_phenomenal_sites = include_phenomenal_sites;
+  cluster_specs.cutoff_radius = cutoff_radius;
+  return cluster_specs;
+}
 
 clust::ClusterSpecs make_cluster_specs(
     std::shared_ptr<xtal::BasicStructure const> const &prim,
@@ -110,20 +187,7 @@ clust::ClusterSpecs make_cluster_specs(
     cluster_specs.site_filter = clust::alloy_sites_filter;
   } else if (site_filter_method == "all_sites") {
     cluster_specs.site_filter = clust::all_sites_filter;
-  } else if (site_filter_method == "selected_sites") {
-    //cluster_specs.site_filter = FilterBySublatticeIndex(prim, included_sublattices);
-    if (included_sublattices.has_value()) {
-        cluster_specs.site_filter =
-        FilterBySublatticeIndex(prim, *included_sublattices);
-    }
-    else {
-        std::stringstream ss;
-        ss << "Error in make_cluster_specs: site_filter_method="
-        << site_filter_method << " is selected_sites but included_sublattices is not provided";
-        throw std::runtime_error(ss.str());
-    }
-  }
-  else {
+  } else {
     std::stringstream ss;
     ss << "Error in make_cluster_specs: site_filter_method="
        << site_filter_method << " is not recognized";
@@ -567,11 +631,7 @@ PYBIND11_MODULE(_clusterography, m) {
                   Include all sites with >1 allowed occupant DoF
               "all_sites":
                   Include all sites
-              "selected_sites":
-                  Include sites with sublattice index in included_sublattices
-      included_sublattices: Optional[set[int]] = None
-          For "selected_sites" `site_filter_method`, specifies the sublattice
-          indices to include in the generated clusters.
+
       phenomenal: Optional[Cluster] = None
           For local clusters, specifies the sites about which local-clusters
           are generated.
@@ -644,36 +704,7 @@ PYBIND11_MODULE(_clusterography, m) {
       .def(
           "make_orbits",
           [](clust::ClusterSpecs const &cluster_specs) {
-            // construct
-            std::vector<std::set<clust::IntegralCluster>> _orbits;
-            if (cluster_specs.phenomenal.has_value()) {
-              // local clusters
-              auto symgroup_rep = sym_info::make_unitcellcoord_symgroup_rep(
-                  cluster_specs.generating_group->element, *cluster_specs.prim);
-              _orbits = make_local_orbits(
-                  cluster_specs.prim, symgroup_rep, cluster_specs.site_filter,
-                  cluster_specs.max_length, cluster_specs.custom_generators,
-                  cluster_specs.phenomenal.value(), cluster_specs.cutoff_radius,
-                  cluster_specs.include_phenomenal_sites);
-            } else {
-              // prim periodic clusters
-              auto generating_group_unitcellcoord_symgroup_rep =
-                  sym_info::make_unitcellcoord_symgroup_rep(
-                      cluster_specs.generating_group->element,
-                      *cluster_specs.prim);
-              _orbits = make_prim_periodic_orbits(
-                  cluster_specs.prim,
-                  generating_group_unitcellcoord_symgroup_rep,
-                  cluster_specs.site_filter, cluster_specs.max_length,
-                  cluster_specs.custom_generators);
-            }
-
-            // copy
-            std::vector<std::vector<clust::IntegralCluster>> orbits;
-            for (Index i = 0; i < _orbits.size(); ++i) {
-              orbits.emplace_back(_orbits[i].begin(), _orbits[i].end());
-            }
-            return orbits;
+            return make_orbits(cluster_specs);
           },
           R"pbdoc(
           Construct cluster orbits
@@ -757,6 +788,66 @@ PYBIND11_MODULE(_clusterography, m) {
         ss << json;
         return ss.str();
       });
+
+  m.def("make_custom_cluster_specs", &make_custom_cluster_specs,
+        R"pbdoc(
+      Make a ClusterSpecs with entirely custom generators based on a custom
+      site filter method
+
+      This method does the following:
+
+      - Construct a ClusterSpecs with a custom site filter method
+      - Use it to construct orbits
+      - Construct a new ClusterSpecs with custom generators for each orbit
+        in the generated orbits, and max_length = [0., 0.]
+
+      This allows using a custom site filter method to generate clusters and
+      maintains the ability for the ClusterSpecs to be converted to/from JSON.
+
+      Parameters
+      ----------
+      xtal_prim : libcasm.xtal.Prim
+          The :class:`libcasm.xtal.Prim`
+      generating_group: libcasm.sym_info.SymGroup
+          The group used to generate orbits of equivalent clusters
+      site_filter_f: Callable[[libcasm.xtal.IntegralSiteCoordinate], bool]
+          A function for selecting which sites are included in clusters. It should
+          return True if the site should be included, False otherwise.
+      max_length: list[float]=[]
+          The maximum site-to-site distance to allow in clusters, by number
+          of sites in the cluster. Example: `[0.0, 0.0, 5.0, 4.0]` specifies
+          that pair clusters up to distance 5.0 and triplet clusters up to
+          distance 4.0 should be included. The null cluster and point
+          cluster values (elements 0 and 1) are arbitrary.
+      custom_generators: list[ClusterOrbitGenerator]=[]
+          Specifies clusters that should be uses to construct orbits
+          regardless of the max_length or cutoff_radius parameters
+      phenomenal: Optional[Cluster] = None
+          For local clusters, specifies the sites about which local-clusters
+          are generated.
+      include_phenomenal_sites: bool = False
+          For local clusters, if True, the phenomenal cluster sites are
+          included in the local-clusters.
+      cutoff_radius: list[float]
+          For local clusters, the maximum distance of sites from any
+          phenomenal cluster site to include in the local environment, by
+          number of sites in the cluster. The null cluster value
+          (element 0) is arbitrary.
+
+      Returns
+      -------
+      custom_cluster_specs: ClusterSpecs
+          A ClusterSpecs instance in which `max_length` is set to ``[0., 0.]``
+          and `custom_generators` is filled with prototypes of the orbits
+          generated the parameters.
+      )pbdoc",
+        py::arg("xtal_prim"), py::arg("generating_group"),
+        py::arg("site_filter_f"), py::arg("max_length") = std::vector<double>{},
+        py::arg("custom_generators") =
+            std::vector<clust::IntegralClusterOrbitGenerator>{},
+        py::arg("phenomenal") = std::nullopt,
+        py::arg("include_phenomenal_sites") = false,
+        py::arg("cutoff_radius") = std::vector<double>{});
 
   m.def(
       "make_integral_site_coordinate_symgroup_rep",

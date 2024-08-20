@@ -315,3 +315,112 @@ def test_make_local_cluster_specs():
     assert len(orbits[2]) == 4
     assert len(orbits[3]) == 8
     assert len(orbits[4]) == 2
+
+
+def find_asym_unit_index(sublattice_index, asym_units):
+    for asym_unit_index, asym_unit in enumerate(asym_units):
+        if sublattice_index in asym_unit:
+            return asym_unit_index
+    return None
+
+
+def test_make_custom_cluster_specs(FCC_with_interstitials_prim):
+    """Only make clusters from 1 of the [Va, O] sites, save as custom generators"""
+
+    xtal_prim = FCC_with_interstitials_prim
+    prim_factor_group = sym_info.make_factor_group(xtal_prim)
+
+    # symmetrically equivalent sublattices
+    # A_sites = [0]
+    tet_sites = [1, 2]
+    oct_sites = [3]
+
+    ### Make tet clusters, make oct clusters, then combine approach ###
+
+    # Step 1: function to include tet sites only (cutoff = 10.4)
+    def tet_site_filter_f(site: xtal.IntegralSiteCoordinate) -> bool:
+        return site.sublattice() in tet_sites
+
+    tet_only_cluster_specs = clust.make_custom_cluster_specs(
+        xtal_prim=xtal_prim,
+        generating_group=prim_factor_group,
+        site_filter_f=tet_site_filter_f,
+        max_length=[0.0, 0.0, 10.4],
+    )
+    assert isinstance(tet_only_cluster_specs, clust.ClusterSpecs)
+    tet_only_orbits = tet_only_cluster_specs.make_orbits()
+    # print([orbit[0] for orbit in tet_only_orbits])
+    assert len(tet_only_orbits) == 40
+
+    # Step 2: lambda function to include oct sites only (cutoff = 20.4)
+    oct_only_cluster_specs = clust.make_custom_cluster_specs(
+        xtal_prim=xtal_prim,
+        generating_group=prim_factor_group,
+        site_filter_f=lambda site: site.sublattice() in oct_sites,
+        max_length=[0.0, 0.0, 20.4],
+    )
+    oct_only_orbits = oct_only_cluster_specs.make_orbits()
+    # print([orbit[0] for orbit in oct_only_orbits])
+    assert len(oct_only_orbits) == 78
+
+    # Now combine & also include some clusters of any site (cutoff = 4.01)
+    cluster_specs = clust.ClusterSpecs(
+        xtal_prim=xtal_prim,
+        generating_group=prim_factor_group,
+        max_length=[0.0, 0.0, 4.01],
+        site_filter_method="all_sites",
+        custom_generators=tet_only_cluster_specs.custom_generators()
+        + oct_only_cluster_specs.custom_generators(),
+    )
+    orbits = cluster_specs.make_orbits()
+    # print([orbit[0] for orbit in orbits])
+    assert len(orbits) == 126
+
+    ### Make all clusters and then filter approach ###
+    cluster_specs = clust.ClusterSpecs(
+        xtal_prim=xtal_prim,
+        generating_group=prim_factor_group,
+        max_length=[0.0, 0.0, 20.4],
+        site_filter_method="all_sites",
+    )
+    orbits = cluster_specs.make_orbits()
+
+    def all_tet(proto):
+        for site in proto:
+            if site.sublattice() not in tet_sites:
+                return False
+        return True
+
+    def all_oct(proto):
+        for site in proto:
+            if site.sublattice() not in oct_sites:
+                return False
+        return True
+
+    include_subclusters = False
+    custom_generators = []
+    for orbit in orbits:
+        proto = orbit[0]
+        max_dist = proto.to_dict(xtal_prim).get("max_length")
+        if all_tet(proto) and max_dist < 10.4:
+            custom_generators.append(
+                clust.ClusterOrbitGenerator(proto, include_subclusters)
+            )
+            continue
+        if all_oct(proto) and max_dist < 20.4:
+            custom_generators.append(
+                clust.ClusterOrbitGenerator(proto, include_subclusters)
+            )
+            continue
+    # print(custom_generators)
+
+    cluster_specs = clust.ClusterSpecs(
+        xtal_prim=xtal_prim,
+        generating_group=prim_factor_group,
+        max_length=[0.0, 0.0, 4.01],
+        site_filter_method="all_sites",
+        custom_generators=custom_generators,
+    )
+    orbits = cluster_specs.make_orbits()
+    # print([orbit[0] for orbit in orbits])
+    assert len(orbits) == 126

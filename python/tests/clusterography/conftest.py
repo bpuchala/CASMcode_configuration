@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import libcasm.xtal as xtal
+import libcasm.xtal.lattices as xtal_lattices
 
 
 @pytest.fixture
@@ -97,4 +98,26 @@ def ZrO_prim():
         local_dof=local_dof,
         global_dof=global_dof,
         occupants=occupants,
+    )
+
+
+@pytest.fixture
+def FCC_with_interstitials_prim():
+    coordinate_frac = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.25, 0.25, 0.25],
+            [0.75, 0.75, 0.75],
+            [0.5, 0.5, 0.5],
+        ]
+    ).transpose()
+
+    occ_dof = [["A"], ["Itet"], ["Itet"], ["Ioct"]]
+
+    return xtal.make_primitive_prim(
+        xtal.Prim(
+            lattice=xtal_lattices.FCC(a=4.0),
+            coordinate_frac=coordinate_frac,
+            occ_dof=occ_dof,
+        )
     )

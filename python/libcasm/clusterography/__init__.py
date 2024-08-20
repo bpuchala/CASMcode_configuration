@@ -29,6 +29,7 @@ from ._clusterography import (
     ClusterSpecs,
     equivalents_info_from_dict,
     make_cluster_group,
+    make_custom_cluster_specs,
     make_integral_site_coordinate_symgroup_rep,
     make_local_cluster_group,
     make_local_equivalence_map,
