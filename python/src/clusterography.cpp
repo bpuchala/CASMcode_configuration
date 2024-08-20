@@ -76,15 +76,15 @@ clust::IntegralCluster make_cluster_from_list(
 struct FilterBySublatticeIndex {
   FilterBySublatticeIndex(
       std::shared_ptr<xtal::BasicStructure const> const &prim,
-      std::set<Index> included_sublattices)
+      std::set<Index> sublattice_indices)
       : m_prim(prim), m_included_sublattices(sublattice_indices) {}
 
   bool operator()(xtal::Site const &site) const {
     xtal::UnitCellCoord unitcellcoord = xtal::UnitCellCoord::from_coordinate(
-        *m_prim, site.coordinate(), m_prim->lattice().tol())
-        Index sublattice_index = unitcellcoord.sublattice();
+        *m_prim, site, m_prim->lattice().tol());
+    Index sublattice_index = unitcellcoord.sublattice();
     return m_included_sublattices.find(sublattice_index) !=
-           m_sublattice_indices.end();
+           m_included_sublattices.end();
   }
 
   std::shared_ptr<xtal::BasicStructure const> m_prim;
@@ -111,9 +111,19 @@ clust::ClusterSpecs make_cluster_specs(
   } else if (site_filter_method == "all_sites") {
     cluster_specs.site_filter = clust::all_sites_filter;
   } else if (site_filter_method == "selected_sites") {
-    cluster_specs.site_filter =
-        FilterBySublatticeIndex(prim, included_sublattices);
-  } else {
+    //cluster_specs.site_filter = FilterBySublatticeIndex(prim, included_sublattices);
+    if (included_sublattices.has_value()) {
+        cluster_specs.site_filter =
+        FilterBySublatticeIndex(prim, *included_sublattices);
+    }
+    else {
+        std::stringstream ss;
+        ss << "Error in make_cluster_specs: site_filter_method="
+        << site_filter_method << " is selected_sites but included_sublattices is not provided";
+        throw std::runtime_error(ss.str());
+    }
+  }
+  else {
     std::stringstream ss;
     ss << "Error in make_cluster_specs: site_filter_method="
        << site_filter_method << " is not recognized";
@@ -557,7 +567,11 @@ PYBIND11_MODULE(_clusterography, m) {
                   Include all sites with >1 allowed occupant DoF
               "all_sites":
                   Include all sites
-
+              "selected_sites":
+                  Include sites with sublattice index in included_sublattices
+      included_sublattices: Optional[set[int]] = None
+          For "selected_sites" `site_filter_method`, specifies the sublattice
+          indices to include in the generated clusters.
       phenomenal: Optional[Cluster] = None
           For local clusters, specifies the sites about which local-clusters
           are generated.
@@ -575,6 +589,7 @@ PYBIND11_MODULE(_clusterography, m) {
            py::arg("custom_generators") =
                std::vector<clust::IntegralClusterOrbitGenerator>{},
            py::arg("site_filter_method") = std::string("dof_sites"),
+           py::arg("included_sublattices") = std::nullopt,
            py::arg("phenomenal") = std::nullopt,
            py::arg("include_phenomenal_sites") = false,
            py::arg("cutoff_radius") = std::vector<double>{})
