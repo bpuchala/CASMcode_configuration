@@ -325,7 +325,7 @@ def find_asym_unit_index(sublattice_index, asym_units):
 
 
 def test_make_custom_cluster_specs(FCC_with_interstitials_prim):
-    """Only make clusters from 1 of the [Va, O] sites, save as custom generators"""
+    """Make clusters of FCC oct / tet sites separately, save as custom generators"""
 
     xtal_prim = FCC_with_interstitials_prim
     prim_factor_group = sym_info.make_factor_group(xtal_prim)
