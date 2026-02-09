@@ -1,12 +1,11 @@
 import numpy as np
+import pytest
 
 import libcasm.clexulator as casmclex
 import libcasm.configuration as casmconfig
 import libcasm.enumerate as casmenum
 import libcasm.xtal as xtal
 import libcasm.xtal.prims as xtal_prims
-
-import pytest
 
 
 def test_ConfigEnumMeshGrid_by_range_FCC_1():
