@@ -58,4 +58,5 @@ from ._ReciprocalSupercell import (
     make_kpoint_irreps,
     make_plane_wave_basis,
     make_unique_kpoint_irreps,
+    min_supercell_for_kpoint,
 )
