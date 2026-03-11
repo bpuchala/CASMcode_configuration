@@ -895,6 +895,160 @@ struct MakeAllSubgroupsFromGenerators {
            std::function<void(Index, Index)> progress_callback = nullptr);
 };
 
+/// \brief Data for the quotient group T/S
+///
+/// Given a group T and a normal subgroup S ≤ T, this struct holds the quotient
+/// group T/S along with the coset map and canonical representatives.
+struct QuotientGroupData {
+  /// \brief The quotient group T/S as a GenericGroup
+  std::shared_ptr<GenericGroup> group;
+
+  /// \brief coset_of[t] = coset index of element t in T/S (size = |T|)
+  std::vector<Index> coset_of;
+
+  /// \brief rep[c] = index of the canonical representative (smallest element)
+  ///     of coset c in T (size = |T/S|)
+  std::vector<Index> rep;
+};
+
+/// \brief Compute the quotient group T/S for a normal subgroup S of T
+///
+/// Cosets are enumerated in order of their smallest element, which becomes
+/// the canonical representative. Since T is abelian (translation group),
+/// left and right cosets coincide.
+///
+/// \param T_group The group T (must be the head group, not a subgroup)
+/// \param S_indices Indices forming a normal subgroup S of T
+/// \returns QuotientGroupData: quotient group T/S, coset map, and
+///     representatives
+inline QuotientGroupData make_quotient_group_data(
+    GenericGroup const &T_group, std::set<Index> const &S_indices) {
+  Index N_T = T_group.size();
+  Index N_S = static_cast<Index>(S_indices.size());
+  Index N_TS = N_T / N_S;
+
+  std::vector<Index> coset_of(N_T, -1);
+  std::vector<Index> rep;
+  rep.reserve(N_TS);
+
+  // Enumerate cosets in order of smallest representative.
+  // Iterating t from 0 upward, the first unassigned t is the smallest
+  // element of its coset (all smaller coset-mates would have been
+  // assigned when their own coset was first encountered).
+  Index coset_idx = 0;
+  for (Index t = 0; t < N_T; ++t) {
+    if (coset_of[t] != -1) continue;
+    rep.push_back(t);
+    for (Index s : S_indices) {
+      coset_of[T_group.mult(t, s)] = coset_idx;
+    }
+    ++coset_idx;
+  }
+
+  // Build quotient multiplication table:
+  //   quot_mult[a][b] = coset_of[T.mult(rep[a], rep[b])]
+  MultiplicationTable quot_mult(N_TS, std::vector<Index>(N_TS));
+  for (Index a = 0; a < N_TS; ++a)
+    for (Index b = 0; b < N_TS; ++b)
+      quot_mult[a][b] = coset_of[T_group.mult(rep[a], rep[b])];
+
+  return {std::make_shared<GenericGroup>(quot_mult), std::move(coset_of),
+          std::move(rep)};
+}
+
+/// \brief Find all subgroups using the normal translation subgroup structure
+///
+/// Exploits the group extension structure G = T.F, where:
+/// - G is the full group (e.g. all SupercellSymOp combinations)
+/// - T = {0, ..., N_translations - 1} is the normal translation subgroup
+/// - F = G/T is the quotient group (e.g. the supercell factor group)
+///
+/// Elements of G are indexed as:
+///   g = f * N_translations + t
+/// where f is the F-index (0, ..., |F|-1) and t is the T-index
+/// (0, ..., N_translations-1). This is consistent with SupercellSymOp
+/// iteration order (translations in inner loop, factor group in outer loop).
+///
+/// The algorithm:
+/// 1. Constructs T and F as standalone GenericGroup objects from G's
+///    multiplication table.
+/// 2. Finds all subgroups of T and all subgroups of F using
+///    MakeAllSubgroupsFromGenerators.
+/// 3. Precomputes the conjugation action of F on T:
+///    conj_action[f][t] = rep(f) * t * rep(f)^{-1}, where rep(f) = f *
+///    N_translations.
+/// 4. For each subgroup S of T and subgroup K of F, checks whether K
+///    normalizes S (i.e. conj(k, s) in S for all k in K, s in S).
+/// 5. For each K-normalizing (K, S) pair, enumerates all valid sections
+///    ξ: K → T/S via find_all_sections_brute_force. Each valid ξ defines a
+///    distinct subgroup H_ξ ≤ G with H_ξ ∩ T = S and H_ξ/(H_ξ ∩ T) ≅ K.
+///
+/// Correctness:
+/// - Every subgroup H ≤ G satisfies H ∩ T = S for some S ≤ T and projects
+///   onto some K ≤ F with K normalizing S, so all subgroups are found.
+/// - This holds for both symmorphic (G = T x| F) and non-symmorphic groups.
+///
+/// Performance:
+/// - The section search is brute-force: O(|T/S|^r × |K|²) per (K, S) pair,
+///   where r = number of K generators (typically ≤ 3). This can be slow when
+///   |T/S| is large (large supercell, small S).
+///
+struct MakeAllSubgroupsFromNormalSubgroup {
+  /// \brief The head group G
+  std::shared_ptr<GenericGroup const> group;
+
+  /// \brief Size of the translation subgroup T = {0, ..., N_translations - 1}
+  Index N_translations;
+
+  /// \brief Map type: (subgroup indices in G) -> (generators in G)
+  typedef std::map<std::set<Index>, std::set<Index>> map_type;
+
+  /// \brief All subgroups found, as (indices in G) -> (generators in G)
+  map_type subgroups;
+
+  /// \brief True if G is a semidirect product T x| F (symmorphic case)
+  ///
+  /// G is a semidirect product if and only if the coset representatives
+  /// {f * N_translations : f in F} form a subgroup of G, i.e. the product
+  /// of any two coset representatives is also a coset representative:
+  ///   group->mult(f1 * N_T, f2 * N_T) % N_T == 0  for all f1, f2 in F.
+  ///
+  /// run() finds all subgroups regardless of this flag. For symmorphic groups
+  /// the 2-cocycle is identically zero, making the section search faster in
+  /// practice (only 1-cocycles ξ ∈ Z¹(K, T/S) are valid). The flag is
+  /// retained for informational purposes.
+  bool is_symmorphic;
+
+  /// \brief Constructor
+  ///
+  /// \param _group The full group G
+  /// \param _N_translations Size of the translation subgroup T. The
+  ///     translation subgroup is T = {0, ..., _N_translations - 1}.
+  MakeAllSubgroupsFromNormalSubgroup(std::shared_ptr<GenericGroup const> _group,
+                                     Index _N_translations)
+      : group(_group), N_translations(_N_translations) {
+    Index N_T = N_translations;
+    Index N_F = group->size() / N_T;
+    is_symmorphic = true;
+    for (Index f1 = 0; f1 < N_F && is_symmorphic; ++f1)
+      for (Index f2 = 0; f2 < N_F && is_symmorphic; ++f2)
+        if (group->mult(f1 * N_T, f2 * N_T) % N_T != 0) is_symmorphic = false;
+  }
+
+  /// \brief Run the subgroup finding algorithm
+  ///
+  /// Finds all subgroups of G for both symmorphic and non-symmorphic groups
+  /// by enumerating all valid sections ξ: K → T/S for each (K, S) pair.
+  /// The brute-force section search has complexity O(|T/S|^r × |K|²) per
+  /// pair, where r is the number of generators of K (typically ≤ 3).
+  ///
+  /// \param n_subtrees_F Number of subtrees for MakeAllSubgroupsFromGenerators
+  ///     applied to F = G/T (the quotient group).
+  /// \param n_subtrees_T Number of subtrees for MakeAllSubgroupsFromGenerators
+  ///     applied to T (the translation subgroup).
+  void run(Index n_subtrees_F = 100, Index n_subtrees_T = 100);
+};
+
 /// \brief From found subgroups, make a container with maximal proper subgroups
 ///
 /// A maximal proper subgroup is a proper subgroup that is not a proper subset
@@ -960,17 +1114,27 @@ class Subset {
   /// \brief Constructor (full group)
   ///
   /// \param group The head group
-  Subset(std::shared_ptr<GenericGroup const> group)
+  /// \param N_translations Optional size of the translation subgroup T =
+  ///     {0, ..., N_translations-1}. Required for the "normal_subgroup" method
+  ///     of all_subgroups().
+  Subset(std::shared_ptr<GenericGroup const> group,
+         std::optional<Index> N_translations = std::nullopt)
       : Subset(std::move(group),
-               Group_impl::_identity_indices_set(group->size())) {}
+               Group_impl::_identity_indices_set(group->size()),
+               N_translations) {}
 
   /// \brief Constructor
   ///
   /// \param group The head group
   /// \param indices Indices of elements into `group` that form the subset
-  Subset(std::shared_ptr<GenericGroup const> group, std::set<Index> indices)
+  /// \param N_translations Optional size of the translation subgroup T =
+  ///     {0, ..., N_translations-1}. Required for the "normal_subgroup" method
+  ///     of all_subgroups().
+  Subset(std::shared_ptr<GenericGroup const> group, std::set<Index> indices,
+         std::optional<Index> N_translations = std::nullopt)
       : m_group(group),
         m_indices(std::move(indices)),
+        m_N_translations(N_translations),
         m_is_group(std::nullopt),
         m_is_normal(std::nullopt),
         m_cyclic_generators(std::nullopt),
@@ -1231,41 +1395,68 @@ class Subset {
     return *m_minimal_generators;
   }
 
+  /// \brief Optional size of the translation subgroup T = {0,...,N-1}
+  ///
+  /// Required for the "normal_subgroup" method of all_subgroups().
+  std::optional<Index> const &N_translations() const {
+    return m_N_translations;
+  }
+
   /// \brief Check if all subgroups have been computed
   bool has_all_subgroups() const { return m_all_subgroups.has_value(); }
 
   /// \brief Return all subgroups
   ///
-  /// Uses a depth-first search for combinations of subset elements to use
-  /// as subgroup generators
+  /// Find all subgroups of this subset.
   ///
   /// Notes:
   /// - This subset should be a group
   ///
-  /// \param n_subtrees The number of subtrees to divide the search tree into.
+  /// \param n_subtrees The number of subtrees to divide the search tree into
+  ///     (used by method="depth_first_search" only).
+  /// \param method Which algorithm to use:
+  ///     - "depth_first_search" (default): multithreaded depth-first search
+  ///       over generator combinations. General purpose.
+  ///     - "normal_subgroup": exploits the G = T.F extension structure.
+  ///       Requires N_translations to be set on the Subset.
   /// \param progress_callback A callback function which takes two Index
   ///     arguments: the number of finished subtrees and the total number of
-  ///     subgroups found so far. This is called each time a task is finished.
+  ///     subgroups found so far. This is called each time a task is finished
+  ///     (used by method="depth_first_search" only).
   ///
   std::vector<Subset> const &all_subgroups(
-      Index n_subtrees = 100,
+      Index n_subtrees = 100, std::string method = "depth_first_search",
       std::function<void(Index, Index)> progress_callback = nullptr) const {
     if (!m_all_subgroups.has_value()) {
-      if (progress_callback == nullptr) {
-        progress_callback = DefaultProgressCallback(n_subtrees);
-      }
-      MakeAllSubgroupsFromGenerators x(m_group, m_indices);
-      x.run(n_subtrees, progress_callback);
+      if (method == "normal_subgroup") {
+        if (!m_N_translations.has_value()) {
+          throw std::runtime_error(
+              "Subset::all_subgroups: method='normal_subgroup' requires "
+              "N_translations to be set on the Subset.");
+        }
+        MakeAllSubgroupsFromNormalSubgroup maker(m_group, *m_N_translations);
+        maker.run();
 
-      // Store results
-      m_all_subgroups_generators = std::vector<std::set<Index>>();
-      m_all_subgroups = std::vector<Subset>();
+        m_all_subgroups_generators = std::vector<std::set<Index>>();
+        m_all_subgroups = std::vector<Subset>();
+        for (auto const &[indices, generators] : maker.subgroups) {
+          m_all_subgroups_generators->push_back(generators);
+          m_all_subgroups->emplace_back(m_group, indices);
+        }
+      } else {
+        // method == "depth_first_search"
+        if (progress_callback == nullptr) {
+          progress_callback = DefaultProgressCallback(n_subtrees);
+        }
+        MakeAllSubgroupsFromGenerators x(m_group, m_indices);
+        x.run(n_subtrees, progress_callback);
 
-      Index i = 0;
-      for (auto const &res : x.subgroups) {
-        m_all_subgroups_generators->push_back(res.second);
-        m_all_subgroups->emplace_back(m_group, res.first);
-        ++i;
+        m_all_subgroups_generators = std::vector<std::set<Index>>();
+        m_all_subgroups = std::vector<Subset>();
+        for (auto const &res : x.subgroups) {
+          m_all_subgroups_generators->push_back(res.second);
+          m_all_subgroups->emplace_back(m_group, res.first);
+        }
       }
     }
     return *m_all_subgroups;
@@ -1281,7 +1472,9 @@ class Subset {
   ///
   std::vector<std::set<Index>> const &all_subgroups_generators() const {
     if (!m_all_subgroups.has_value()) {
-      this->all_subgroups();
+      throw std::runtime_error(
+          "Error in Subset::all_subgroups_generators: all_subgroups() must be "
+          "called first.");
     }
     return *m_all_subgroups_generators;
   }
@@ -1289,7 +1482,9 @@ class Subset {
   bool is_simple_group() const {
     if (!m_is_simple_group.has_value()) {
       if (!m_all_subgroups.has_value()) {
-        this->all_subgroups();
+        throw std::runtime_error(
+            "Error in Subset::is_simple_group: all_subgroups() must be called "
+            "first.");
       }
       m_is_simple_group = this->_is_simple_group();
     }
@@ -1358,7 +1553,7 @@ class Subset {
     if (!this->is_group()) {
       return false;
     }
-    for (const auto &subgroup : this->all_subgroups()) {
+    for (const auto &subgroup : *m_all_subgroups) {
       if (subgroup.indices().size() == 1) {
         continue;  // Skip the trivial subgroup
       }
@@ -1415,6 +1610,10 @@ class Subset {
   std::shared_ptr<GenericGroup const> const m_group;
 
   std::set<Index> const m_indices;
+
+  /// \brief Size of the translation subgroup, if this group has the structure
+  ///     G = T.F with T = {0, ..., N_translations-1}. Optional.
+  std::optional<Index> m_N_translations;
 
   /// \brief Stores whether the subset is a group, if known
   mutable std::optional<bool> m_is_group;
@@ -1876,6 +2075,13 @@ inline void MakeAllSubgroupsFromGenerators::run(
     }
   }
 
+  // If no candidate generators, the only subgroup is the trivial one.
+  if (candidate_generators.empty()) {
+    subgroups.emplace(std::set<Index>{0}, std::set<Index>{0});
+    progress_callback(n_subtrees, subgroups_size());
+    return;
+  }
+
   std::set<Task> unfinished;
 
   std::vector<member_iterator> iters;
@@ -1984,6 +2190,225 @@ inline void MakeAllSubgroupsFromGenerators::run(
   }
 
   // Finally, always add the trivial subgroup
+  subgroups.emplace(std::set<Index>{0}, std::set<Index>{0});
+}
+
+/// \brief Brute-force enumeration of all sections ξ: K → T/S satisfying the
+///     group extension cocycle equation
+///
+/// A section σ_ξ: K → G is defined by choosing, for each k ∈ K, an element
+/// of G in coset k with translation part ξ(k) ∈ T/S:
+///
+///   σ_ξ(k) has G-index  k * N_T + rep_TS[ξ(k)]
+///
+/// For σ_ξ to define a subgroup H = {σ_ξ(k) * s : k ∈ K, s ∈ S}, ξ must
+/// satisfy the cocycle equation for all k1, k2 ∈ K (in T/S, written
+/// additively):
+///
+///   ξ(k1 * k2) = ξ(k1) + act(k1, ξ(k2)) + c_K(k1, k2)
+///
+/// where:
+/// - act(k, ts) = act_on_TS[k][ts] is the K-action on T/S
+/// - c_K(k1, k2) = c_K_TS[k1][k2] is the 2-cocycle (always 0 for symmorphic)
+///
+/// Algorithm: enumerate all ξ on generators of K (BFS from identity),
+/// extend to all K via the recurrence, check all |K|² equations.
+///
+/// Complexity: O(|T/S|^r × |K|²) where r = number of generators of K.
+///
+/// \param K_indices Elements of K (as indices into F_group)
+/// \param K_gen Generators of K (as indices into F_group)
+/// \param F_group The quotient group F = G/T
+/// \param TS Quotient group data for T/S
+/// \param act_on_TS act_on_TS[f][ts]: action of F-element f on T/S-element ts
+/// \param c_K_TS c_K_TS[f1][f2]: 2-cocycle φ(f1,f2) as a T/S index
+///
+/// \returns Vector of valid sections; each xi[k] gives the T/S index for k ∈ K
+///     (size = F_group.size(); entries for k ∉ K are meaningless).
+inline std::vector<std::vector<Index>> find_all_sections_brute_force(
+    std::set<Index> const &K_indices, std::set<Index> const &K_gen,
+    GenericGroup const &F_group, QuotientGroupData const &TS,
+    std::vector<std::vector<Index>> const &act_on_TS,
+    std::vector<std::vector<Index>> const &c_K_TS) {
+  Index N_TS = TS.group->size();
+  std::vector<Index> gen_vec(K_gen.begin(), K_gen.end());
+  Index r = static_cast<Index>(gen_vec.size());
+
+  // BFS ordering of K elements (vector used as queue).
+  // For i >= 1: bfs_order[i] = bfs_order[bfs_parent_node[i-1]] *
+  // gen[bfs_parent_gen[i-1]]
+  std::vector<Index> bfs_order;
+  std::vector<Index> bfs_parent_node;
+  std::vector<Index> bfs_parent_gen;
+  std::vector<bool> visited(F_group.size(), false);
+  bfs_order.push_back(0);  // identity
+  visited[0] = true;
+  for (Index qi = 0; qi < static_cast<Index>(bfs_order.size()); ++qi) {
+    Index prev = bfs_order[qi];
+    for (Index gi = 0; gi < r; ++gi) {
+      Index k = F_group.mult(prev, gen_vec[gi]);
+      if (!visited[k]) {
+        visited[k] = true;
+        bfs_order.push_back(k);
+        bfs_parent_node.push_back(prev);
+        bfs_parent_gen.push_back(gi);
+      }
+    }
+  }
+  Index K_size = static_cast<Index>(bfs_order.size());
+
+  std::vector<std::vector<Index>> results;
+  std::vector<Index> xi_on_gens(r, 0);  // ξ values on generators, odometer
+
+  while (true) {
+    // Extend ξ to all K via the BFS recurrence:
+    //   ξ(prev * g) = ξ(prev) +_{T/S} act(prev, ξ(g)) +_{T/S} c_K(prev, g)
+    std::vector<Index> xi(F_group.size(), 0);
+    for (Index i = 1; i < K_size; ++i) {
+      Index k = bfs_order[i];
+      Index prev = bfs_parent_node[i - 1];
+      Index gi = bfs_parent_gen[i - 1];
+      xi[k] = TS.group->mult(
+          TS.group->mult(xi[prev], act_on_TS[prev][xi_on_gens[gi]]),
+          c_K_TS[prev][gen_vec[gi]]);
+    }
+
+    // Check all |K|² cocycle equations
+    bool valid = true;
+    for (Index k1 : K_indices) {
+      for (Index k2 : K_indices) {
+        Index rhs = TS.group->mult(
+            TS.group->mult(xi[k1], act_on_TS[k1][xi[k2]]), c_K_TS[k1][k2]);
+        if (xi[F_group.mult(k1, k2)] != rhs) {
+          valid = false;
+          break;
+        }
+      }
+      if (!valid) break;
+    }
+    if (valid) results.push_back(xi);
+
+    // Advance odometer
+    bool done = true;
+    for (Index i = r - 1; i >= 0; --i) {
+      if (++xi_on_gens[i] < N_TS) {
+        done = false;
+        break;
+      }
+      xi_on_gens[i] = 0;
+    }
+    if (done) break;
+  }
+
+  return results;
+}
+
+/// \brief Run the subgroup finding algorithm using the normal translation
+///     subgroup structure
+inline void MakeAllSubgroupsFromNormalSubgroup::run(Index n_subtrees_F,
+                                                    Index n_subtrees_T) {
+  Index N_G = group->size();
+  Index N_T = N_translations;
+  Index N_F = N_G / N_T;
+
+  // --- Build T as a standalone head group ---
+  // T's multiplication table is the restriction of G's to indices {0..N_T-1},
+  // which is valid because T is closed under multiplication.
+  MultiplicationTable T_mult(N_T, std::vector<Index>(N_T));
+  for (Index i = 0; i < N_T; ++i)
+    for (Index j = 0; j < N_T; ++j) T_mult[i][j] = group->mult(i, j);
+  auto T_group = std::make_shared<GenericGroup>(T_mult);
+
+  // --- Find all subgroups of T ---
+  MakeAllSubgroupsFromGenerators T_finder(T_group);
+  T_finder.run(n_subtrees_T, [](Index, Index) {});
+
+  // --- Build F = G/T as a standalone head group ---
+  // The quotient multiplication: f1 *_F f2 = coset_of(rep(f1) *_G rep(f2)),
+  // where rep(f) = f * N_T and coset_of(g) = g / N_T.
+  // This is well-defined because T is normal in G.
+  MultiplicationTable F_mult(N_F, std::vector<Index>(N_F));
+  for (Index f1 = 0; f1 < N_F; ++f1)
+    for (Index f2 = 0; f2 < N_F; ++f2)
+      F_mult[f1][f2] = group->mult(f1 * N_T, f2 * N_T) / N_T;
+  auto F_group = std::make_shared<GenericGroup>(F_mult);
+
+  // --- Find all subgroups of F ---
+  MakeAllSubgroupsFromGenerators F_finder(F_group);
+  F_finder.run(n_subtrees_F, [](Index, Index) {});
+
+  // --- Precompute conjugation action of F on T ---
+  // conj_action[f][t] = index in T of rep(f) * t * rep(f)^{-1}
+  // where rep(f) = f * N_T is the coset representative of f in G.
+  // The result is guaranteed to be in T since T is normal in G.
+  std::vector<std::vector<Index>> conj_action(N_F, std::vector<Index>(N_T));
+  for (Index f = 0; f < N_F; ++f) {
+    Index rep_f = f * N_T;
+    Index inv_rep_f = group->inv(rep_f);
+    for (Index t = 0; t < N_T; ++t)
+      conj_action[f][t] = group->mult(rep_f, group->mult(t, inv_rep_f));
+  }
+
+  // --- Enumerate (K, S) pairs and find all subgroups of G ---
+  //
+  // For each subgroup K of F and K-invariant subgroup S of T, we enumerate
+  // all valid sections ξ: K → T/S via find_all_sections_brute_force.
+  // Each valid section defines a distinct subgroup H_ξ of G with H_ξ ∩ T = S
+  // and H_ξ / S ≅ K, generated by {k*N_T + rep_TS[ξ(k)] : k ∈ K_gen} ∪ S_gen.
+  //
+  // act_on_TS and c_K_TS depend on T/S (i.e., on S), so they are recomputed
+  // for each S in the outer loop.
+  for (auto const &[S_indices, S_gen] : T_finder.subgroups) {
+    // Compute T/S quotient group and coset map
+    QuotientGroupData TS = make_quotient_group_data(*T_group, S_indices);
+    Index N_TS = TS.group->size();
+
+    // act_on_TS[f][ts] = T/S coset of conj_action[f][rep_TS[ts]]
+    std::vector<std::vector<Index>> act_on_TS(N_F, std::vector<Index>(N_TS));
+    for (Index f = 0; f < N_F; ++f)
+      for (Index ts = 0; ts < N_TS; ++ts)
+        act_on_TS[f][ts] = TS.coset_of[conj_action[f][TS.rep[ts]]];
+
+    // c_K_TS[f1][f2] = T/S coset of the 2-cocycle φ(f1,f2) = rep(f1)*rep(f2)
+    // mod T
+    // (= 0 for all f1,f2 in the symmorphic case)
+    std::vector<std::vector<Index>> c_K_TS(N_F, std::vector<Index>(N_F));
+    for (Index f1 = 0; f1 < N_F; ++f1)
+      for (Index f2 = 0; f2 < N_F; ++f2)
+        c_K_TS[f1][f2] = TS.coset_of[group->mult(f1 * N_T, f2 * N_T) % N_T];
+
+    for (auto const &[K_indices, K_gen] : F_finder.subgroups) {
+      // Check K-invariance of S: for all k in K_generators and s in S,
+      // conj(k, s) must be in S. Checking generators of K suffices since
+      // if generators normalize S, the group they generate does too.
+      bool k_invariant = true;
+      for (Index f : K_gen) {
+        for (Index t : S_indices) {
+          if (!S_indices.count(conj_action[f][t])) {
+            k_invariant = false;
+            break;
+          }
+        }
+        if (!k_invariant) break;
+      }
+      if (!k_invariant) continue;
+
+      // Enumerate all valid sections ξ: K → T/S and build a subgroup for each
+      auto sections = find_all_sections_brute_force(K_indices, K_gen, *F_group,
+                                                    TS, act_on_TS, c_K_TS);
+      for (auto const &xi : sections) {
+        // σ_ξ(k) has G-index k*N_T + rep_TS[ξ(k)]; use K generators as seeds
+        std::set<Index> H_generators;
+        for (Index f : K_gen) H_generators.insert(f * N_T + TS.rep[xi[f]]);
+        for (Index t : S_gen) H_generators.insert(t);
+
+        MakeSubgroupFromGenerators H_maker(*group, H_generators);
+        subgroups.emplace(H_maker.indices, H_maker.generators);
+      }
+    }
+  }
+
+  // Always add the trivial subgroup
   subgroups.emplace(std::set<Index>{0}, std::set<Index>{0});
 }
 

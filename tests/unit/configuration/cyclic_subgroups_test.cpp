@@ -9,6 +9,19 @@
 
 using namespace CASM;
 
+namespace {
+
+// Build a GenericGroup from a multiplication table given as a lambda
+std::shared_ptr<group::GenericGroup> make_generic_group(
+    Index n, std::function<Index(Index, Index)> mult_f) {
+  group::MultiplicationTable table(n, std::vector<Index>(n));
+  for (Index i = 0; i < n; ++i)
+    for (Index j = 0; j < n; ++j) table[i][j] = mult_f(i, j);
+  return std::make_shared<group::GenericGroup>(table);
+}
+
+}  // namespace
+
 namespace cyclic_subgroups_test {
 
 Index multiply_f(Index i, Index j) { return (i + j) % 10; }
@@ -386,4 +399,59 @@ TEST(AllSubgroupsTest, Test2) {
                 47,
             }),
             1);
+}
+
+// Tests for MakeAllSubgroupsFromNormalSubgroup
+
+/// Z_2 x Z_3 (order 6) with indexing g = f*2 + t (N_T=2, N_F=3)
+TEST(MakeAllSubgroupsFromNormalSubgroupTest, Z2xZ3) {
+  using namespace group;
+  // Multiplication: (f1,t1)*(f2,t2) = ((f1+f2)%3, (t1+t2)%2)
+  auto g = make_generic_group(6, [](Index a, Index b) -> Index {
+    Index f = (a / 2 + b / 2) % 3;
+    Index t = (a % 2 + b % 2) % 2;
+    return f * 2 + t;
+  });
+
+  MakeAllSubgroupsFromNormalSubgroup maker(g, /*N_T=*/2);
+  maker.run();
+
+  // Subgroups of Z_6: {0}, T={0,1}, Z_3={0,2,4}, G={0,1,2,3,4,5}
+  EXPECT_EQ(maker.subgroups.size(), 4);
+
+  std::set<std::set<Index>> found;
+  for (auto const &[idx, gen] : maker.subgroups) found.insert(idx);
+
+  EXPECT_EQ(found.count({0}), 1);
+  EXPECT_EQ(found.count({0, 1}), 1);
+  EXPECT_EQ(found.count({0, 2, 4}), 1);
+  EXPECT_EQ(found.count({0, 1, 2, 3, 4, 5}), 1);
+}
+
+/// FCC prim factor group (order 48): verify MakeAllSubgroupsFromGenerators
+/// with 1 subtree runs without crash
+TEST(MakeAllSubgroupsFromNormalSubgroupTest, FCCRefGenerators) {
+  using namespace group;
+  config::PrimSymInfo prim_sym_info(test::FCC_binary_prim());
+  auto fg = prim_sym_info.factor_group;
+
+  MakeAllSubgroupsFromGenerators ref_maker(fg);
+  ref_maker.run(1, [](Index, Index) {});
+  EXPECT_EQ(ref_maker.subgroups.size(), 98u);
+}
+
+/// FCC prim factor group (order 48) with N_T=1 — should find same 98 subgroups
+/// as MakeAllSubgroupsFromGenerators
+TEST(MakeAllSubgroupsFromNormalSubgroupTest, FCCFactorGroupNT1) {
+  using namespace group;
+  config::PrimSymInfo prim_sym_info(test::FCC_binary_prim());
+  auto fg = prim_sym_info.factor_group;
+
+  // Method under test: N_T=1 means T={identity}, F=G
+  MakeAllSubgroupsFromNormalSubgroup maker(fg, /*N_T=*/1);
+  maker.run();
+
+  std::set<std::set<Index>> from_normal;
+  for (auto const &[idx, gen] : maker.subgroups) from_normal.insert(idx);
+  EXPECT_EQ(from_normal.size(), 98u);
 }

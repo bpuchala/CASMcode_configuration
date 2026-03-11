@@ -22,13 +22,14 @@ def _subset_all_subgroups(
     self,
     n_subtrees: int = 100,
     progress: typing.Union[str, typing.Callable] = "alive",
+    method: str = "depth_first_search",
 ):
     """Return all subgroups of this subset
 
     Notes
     -----
 
-    This method:
+    The "depth_first_search" method:
 
     1. Finds all cyclic subgroups and stores the elements which generate unique
        cyclic subgroups as the candidate generators.
@@ -41,7 +42,7 @@ def _subset_all_subgroups(
 
     There are some synchronization costs that come from reading and writing a common
     set of unique subgroups and splitting the search tree. The number of subtrees can
-    be controlled with the `n_subtrees` parameter to balance  the parallelization and
+    be controlled with the `n_subtrees` parameter to balance the parallelization and
     synchronization costs. The number of threads used may be controlled through
     :func:`libcasm.casmglobal.set_max_threads`. Generally it is preferable to have more
     subtrees than threads to avoid waiting on subtrees that take longer to search.
@@ -52,13 +53,22 @@ def _subset_all_subgroups(
     the actual time remaining, because the initial subtrees are likely to be among the
     longest to search.
 
+    The "normal_subgroup" method exploits the group extension structure G = T.F,
+    where T = {0,...,N_translations-1} is the normal translation subgroup and
+    F = G/T is the quotient. It enumerates all valid sections ξ: K → T/S for each
+    pair (K ≤ F, S ≤ T) with K normalizing S, and closes the corresponding
+    generators in G. This finds all subgroups for both symmorphic and non-symmorphic
+    groups, and is faster for large supercell groups. Requires ``N_translations``
+    to be set on the Subset.
 
     Parameters
     ----------
     n_subtrees: int = 100
-        The number of subtrees to divide the search tree into.
-    progress: Optional[str, Callable] = "alive"
-        Indicates the type of progress reporting to use. The options are:
+        The number of subtrees to divide the search tree into (used by
+        method="depth_first_search" only).
+    progress: Union[str, Callable] = "alive"
+        Indicates the type of progress reporting to use (used by
+        method="depth_first_search" only). The options are:
 
         - "alive" (default): a live progress bar is shown.
         - "plain": use the default C++ stdout progress reporting.
@@ -73,11 +83,23 @@ def _subset_all_subgroups(
 
             def progress_f(n_subtrees_completed: int, subgroups_size: int) -> None:
 
+    method: str = "depth_first_search"
+        Which algorithm to use:
+
+        - "depth_first_search" (default): multithreaded depth-first search
+          over generator combinations. General purpose.
+        - "normal_subgroup": exploits the G = T.F extension structure.
+          Requires ``N_translations`` to be set on the Subset.
+
     Returns
     -------
     subgroups: list[Subset]
         The subgroups.
     """
+    if method == "normal_subgroup":
+        return Subset._all_subgroups(self, method="normal_subgroup")
+
+    # method == "depth_first_search"
     if Subset._has_all_subgroups(self):
         return Subset._all_subgroups(self)
 
@@ -106,7 +128,9 @@ def _subset_all_subgroups(
                 bar.text = f"#Subgroups: {subgroups_count}"
                 bar(n_finished_tasks / n_subtrees)
 
-            subgroups = Subset._all_subgroups(self, n_subtrees, progress_callback)
+            subgroups = Subset._all_subgroups(
+                self, n_subtrees, "depth_first_search", progress_callback
+            )
 
     else:
 
@@ -126,7 +150,9 @@ def _subset_all_subgroups(
         elif not callable(progress):
             raise ValueError("progress must be 'alive', 'plain', 'none', or a callable")
 
-        subgroups = Subset._all_subgroups(self, n_subtrees, progress)
+        subgroups = Subset._all_subgroups(
+            self, n_subtrees, "depth_first_search", progress
+        )
 
         if progress is None:
             print("", flush=True)

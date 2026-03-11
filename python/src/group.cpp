@@ -65,7 +65,8 @@ std::shared_ptr<group::GenericGroup const> make_generic_group_subgroup(
 }
 
 group::Subset make_subset(std::shared_ptr<group::GenericGroup const> group,
-                          std::optional<std::set<Index>> indices) {
+                          std::optional<std::set<Index>> indices,
+                          std::optional<Index> N_translations) {
   if (!indices.has_value()) {
     std::set<Index> all_indices;
     for (Index i = 0; i < group->size(); ++i) {
@@ -74,7 +75,7 @@ group::Subset make_subset(std::shared_ptr<group::GenericGroup const> group,
     indices = all_indices;
   }
 
-  return group::Subset(group, *indices);
+  return group::Subset(group, *indices, N_translations);
 }
 
 }  // namespace CASMpy
@@ -354,11 +355,15 @@ PYBIND11_MODULE(_group, m) {
           ----------
           group: GenericGroup
               The group this subset is part of. Must be the head group.
-          indices: Optional[list[int]] = None
+          indices: Optional[set[int]] = None
               Indices of the elements in the group forming the subset. If None,
               all elements in the group are included.
+          N_translations: Optional[int] = None
+              Size of the translation subgroup T = {0, ..., N_translations-1}.
+              Required when using ``all_subgroups(method="normal_subgroup")``.
           )pbdoc",
-           py::arg("group"), py::arg("indices") = std::nullopt)
+           py::arg("group"), py::arg("indices") = std::nullopt,
+           py::arg("N_translations") = std::nullopt)
       .def_static(
           "from_generators",
           [](std::shared_ptr<group::GenericGroup const> const &group,
@@ -383,6 +388,15 @@ PYBIND11_MODULE(_group, m) {
           [](group::Subset const &subset) { return subset.indices(); },
           R"pbdoc(
           set[int]: The indices of elements in the head group that form this subset.
+          )pbdoc")
+      .def_property_readonly(
+          "N_translations",
+          [](group::Subset const &subset) -> std::optional<Index> {
+            return subset.N_translations();
+          },
+          R"pbdoc(
+          Optional[int]: Size of the translation subgroup T = {0,...,N-1},
+          if set. Required for ``all_subgroups(method="normal_subgroup")``.
           )pbdoc")
       .def_property_readonly(
           "group", [](group::Subset const &subset) { return subset.group(); },
@@ -657,9 +671,14 @@ PYBIND11_MODULE(_group, m) {
           )pbdoc")
       .def(
           "_all_subgroups",
-          [](group::Subset const &subset, Index n_subtrees,
+          [](group::Subset const &subset, Index n_subtrees, std::string method,
              std::optional<std::function<void(Index, Index)>>
                  progress_callback_f) -> std::vector<group::Subset> {
+            if (method == "normal_subgroup") {
+              return subset.all_subgroups(n_subtrees, method);
+            }
+
+            // method == "depth_first_search" (default)
             // -- WARNING: Do not set py::scoped_ostream_redirect here --
             //    May cause a deadlock if there is output to std::cout on
             //    threads.
@@ -675,27 +694,36 @@ PYBIND11_MODULE(_group, m) {
             // handler on exit or exception.
             std::vector<group::Subset> const &result = run_with_sigint_handler(
                 [&]() -> std::vector<group::Subset> const & {
-                  return subset.all_subgroups(n_subtrees, *progress_callback_f);
+                  return subset.all_subgroups(n_subtrees, method,
+                                              *progress_callback_f);
                 });
 
             return result;
           },
           R"pbdoc(
-          Return a list of subgroup orbits
+          Return all subgroups of this subset
 
-          Notes
-          -----
+          Parameters
+          ----------
+          n_subtrees: int = 100
+              Number of subtrees (used by method="depth_first_search" only).
+          method: str = "depth_first_search"
+              Which algorithm to use:
 
-          - This uses the original method for finding all subgroups, which
-            is generally slower.
-          - This subset should be a group
+              - "depth_first_search": depth-first search over generator
+                combinations (multithreaded, general purpose).
+              - "normal_subgroup": exploits the G = T.F extension structure
+                where T = {0,...,N_translations-1}. Requires ``N_translations``
+                to be set on the Subset. Faster for large supercell groups.
+          progress_callback: Optional[Callable] = None
+              Progress callback (used by method="depth_first_search" only).
 
           Returns
           -------
           subgroups: list[Subset]
-                The list of all subgroups found.
+              The list of all subgroups found.
           )pbdoc",
-          py::arg("n_subtrees") = 100,
+          py::arg("n_subtrees") = 100, py::arg("method") = "depth_first_search",
           py::arg("progress_callback") = std::nullopt)
       .def(
           "all_subgroup_generators",
