@@ -258,23 +258,23 @@ SupercellSymOp SupercellSymOp::inverse() const {
           .inverse_index[this->m_supercell_factor_group_index];
   inverse_op.m_supercell_factor_group_index = inverse_fg_index;
 
-  // New translation can be found comparing the translation for the inverse of
-  // the "total sym_op" of *this to the inverse of the untranslated sym_op
+  // New translation: inverse of (f, t) is (f_inv, R_frac_inv * (-uc(t)))
+  // where R_frac_inv is the integer fractional rotation matrix for f_inv.
+  //
+  // Derivation: (f, t) * (f_inv, t') = (identity, 0) requires
+  //   action(f, t') + t = 0  =>  t' = R_frac_inv * (-uc(t))  [mod supercell]
 
-  // Find the translation (cartesian coordinates)
-  SymOp const &inverse_sym_op = CASM::config::inverse(this->to_symop());
-  SymOp const &inverse_fg_op = supercell_factor_group.element[inverse_fg_index];
-  Eigen::Vector3d translation_cart =
-      (inverse_sym_op.translation - inverse_fg_op.translation);
+  Index prim_fg_idx_inv =
+      m_supercell->sym_info.factor_group->head_group_index[inverse_fg_index];
+  Eigen::Matrix3l const &R_frac_inv =
+      m_supercell->prim->sym_info.unitcellcoord_symgroup_rep[prim_fg_idx_inv]
+          .point_matrix;
 
-  // convert to fractional coordinates
-  Superlattice const &superlattice = this->m_supercell->superlattice;
-  UnitCell translation_uc =
-      UnitCell::from_cartesian(translation_cart, superlattice.prim_lattice());
-
-  // convert to linear index
+  UnitCell uc_t =
+      m_supercell->unitcell_index_converter(this->m_translation_index);
+  UnitCell inverse_uc{R_frac_inv * (-uc_t)};
   inverse_op.m_translation_index =
-      m_supercell->unitcell_index_converter(translation_uc);
+      m_supercell->unitcell_index_converter(inverse_uc);
 
   return inverse_op;
 }
@@ -297,24 +297,27 @@ SupercellSymOp SupercellSymOp::operator*(SupercellSymOp const &RHS) const {
           .multiplication_table[this->m_supercell_factor_group_index]
                                [RHS.m_supercell_factor_group_index];
 
-  // New translation can be found comparing the translation for the product of
-  // the "total sym_op" to the just the product factor group op translation
+  // New translation: (f1,t1)*(f2,t2) = (f3, R_frac[f1]*uc(t2) + uc(t1))
+  // where R_frac[f1] is the integer fractional rotation matrix for f1.
+  //
+  // Derivation: the prim translations tau cancel between the total SymOp
+  // product and the product factor group element, leaving:
+  //   translation_frac = R_frac[f1] * uc(t2) + uc(t1)  [mod supercell]
 
-  // Find the translation (cartesian coordinates)
-  SymOp total_product_op = this->to_symop() * RHS.to_symop();
-  SymOp const &product_fg_op =
-      supercell_factor_group.element[product_op.m_supercell_factor_group_index];
-  Eigen::Vector3d translation_cart =
-      total_product_op.translation - product_fg_op.translation;
+  Index prim_fg_idx =
+      m_supercell->sym_info.factor_group
+          ->head_group_index[this->m_supercell_factor_group_index];
+  Eigen::Matrix3l const &R_frac =
+      m_supercell->prim->sym_info.unitcellcoord_symgroup_rep[prim_fg_idx]
+          .point_matrix;
 
-  // convert to fractional coordinates
-  Superlattice const &superlattice = this->m_supercell->superlattice;
-  UnitCell translation_uc =
-      UnitCell::from_cartesian(translation_cart, superlattice.prim_lattice());
-
-  // convert to linear index
+  UnitCell uc_rhs =
+      m_supercell->unitcell_index_converter(RHS.m_translation_index);
+  UnitCell uc_lhs =
+      m_supercell->unitcell_index_converter(this->m_translation_index);
+  UnitCell product_uc{R_frac * uc_rhs + uc_lhs};
   product_op.m_translation_index =
-      m_supercell->unitcell_index_converter(translation_uc);
+      m_supercell->unitcell_index_converter(product_uc);
 
   return product_op;
 }
@@ -1076,6 +1079,57 @@ std::shared_ptr<SymGroup const> make_symgroup_v2(
   xtal::SymOpPeriodicCompare_f equal_to_f(prim_lattice, xtal_tol);
   return std::make_shared<SymGroup const>(
       group::make_group(point_ops, multiply_f, equal_to_f));
+}
+
+/// \brief Construct SupercellSymOpFunctors from a supercell
+SupercellSymOpFunctors::SupercellSymOpFunctors(
+    std::shared_ptr<Supercell const> const &supercell) {
+  N_T = supercell->unitcell_index_converter.total_sites();
+  Index n_f = static_cast<Index>(
+      supercell->sym_info.factor_group->multiplication_table.size());
+  N_G = n_f * N_T;
+
+  Index n_t = N_T;
+  mult = [supercell, n_t](Index i, Index j) -> Index {
+    Index f1 = i / n_t;
+    Index t1 = i % n_t;
+    Index f2 = j / n_t;
+    Index t2 = j % n_t;
+
+    SymGroup const &fg = *supercell->sym_info.factor_group;
+    Index f3 = fg.multiplication_table[f1][f2];
+
+    Index prim_fg_idx = fg.head_group_index[f1];
+    Eigen::Matrix3l const &R_frac =
+        supercell->prim->sym_info.unitcellcoord_symgroup_rep[prim_fg_idx]
+            .point_matrix;
+
+    UnitCell uc1 = supercell->unitcell_index_converter(t1);
+    UnitCell uc2 = supercell->unitcell_index_converter(t2);
+    UnitCell uc3{R_frac * uc2 + uc1};
+    Index t3 = supercell->unitcell_index_converter(uc3);
+
+    return f3 * n_t + t3;
+  };
+
+  inv = [supercell, n_t](Index i) -> Index {
+    Index f = i / n_t;
+    Index t = i % n_t;
+
+    SymGroup const &fg = *supercell->sym_info.factor_group;
+    Index f_inv = fg.inverse_index[f];
+
+    Index prim_fg_idx_inv = fg.head_group_index[f_inv];
+    Eigen::Matrix3l const &R_frac_inv =
+        supercell->prim->sym_info.unitcellcoord_symgroup_rep[prim_fg_idx_inv]
+            .point_matrix;
+
+    UnitCell uc_t = supercell->unitcell_index_converter(t);
+    UnitCell uc_inv{R_frac_inv * (-uc_t)};
+    Index t_inv = supercell->unitcell_index_converter(uc_inv);
+
+    return f_inv * n_t + t_inv;
+  };
 }
 
 }  // namespace config

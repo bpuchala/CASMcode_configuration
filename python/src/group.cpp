@@ -623,7 +623,7 @@ PYBIND11_MODULE(_group, m) {
             }
 
             std::set<group::SubgroupOrbit> orbits_set =
-                group::make_all_subgroups(*subset.group());
+                group::make_all_subgroups_by_cyclic_join(*subset.group());
 
             // convert from sets to vectors for Python
 
@@ -674,11 +674,19 @@ PYBIND11_MODULE(_group, m) {
           [](group::Subset const &subset, Index n_subtrees, std::string method,
              std::optional<std::function<void(Index, Index)>>
                  progress_callback_f) -> std::vector<group::Subset> {
-            if (method == "normal_subgroup") {
-              return subset.all_subgroups(n_subtrees, method);
+            if (method == "group_extension" || method == "normal_subgroup" ||
+                method == "cyclic_join") {
+              // group_extension internally uses threaded_pipeline, so the GIL
+              // must be released to avoid deadlocks (same reason as below).
+              std::vector<group::Subset> const &result =
+                  run_with_sigint_handler(
+                      [&]() -> std::vector<group::Subset> const & {
+                        return subset.all_subgroups(n_subtrees, method);
+                      });
+              return result;
             }
 
-            // method == "depth_first_search" (default)
+            // method == "generator_search" or "depth_first_search"
             // -- WARNING: Do not set py::scoped_ostream_redirect here --
             //    May cause a deadlock if there is output to std::cout on
             //    threads.
@@ -706,24 +714,28 @@ PYBIND11_MODULE(_group, m) {
           Parameters
           ----------
           n_subtrees: int = 100
-              Number of subtrees (used by method="depth_first_search" only).
-          method: str = "depth_first_search"
+              Number of subtrees (used by method="generator_search" only).
+          method: str = "generator_search"
               Which algorithm to use:
 
-              - "depth_first_search": depth-first search over generator
-                combinations (multithreaded, general purpose).
-              - "normal_subgroup": exploits the G = T.F extension structure
+              - "generator_search": depth-first search over generator
+                combinations (multithreaded, general purpose). Deprecated
+                alias: "depth_first_search".
+              - "group_extension": exploits the G = T.F extension structure
                 where T = {0,...,N_translations-1}. Requires ``N_translations``
                 to be set on the Subset. Faster for large supercell groups.
+                Deprecated alias: "normal_subgroup".
+              - "cyclic_join": iteratively joins cyclic subgroups (older,
+                simpler algorithm; less efficient for large groups).
           progress_callback: Optional[Callable] = None
-              Progress callback (used by method="depth_first_search" only).
+              Progress callback (used by method="generator_search" only).
 
           Returns
           -------
           subgroups: list[Subset]
               The list of all subgroups found.
           )pbdoc",
-          py::arg("n_subtrees") = 100, py::arg("method") = "depth_first_search",
+          py::arg("n_subtrees") = 100, py::arg("method") = "generator_search",
           py::arg("progress_callback") = std::nullopt)
       .def(
           "all_subgroup_generators",

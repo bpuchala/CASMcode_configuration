@@ -161,6 +161,7 @@ add_executable(casm_unit_configuration
   ${PROJECT_SOURCE_DIR}/unit/configuration/Prim_test.cpp
   ${PROJECT_SOURCE_DIR}/unit/configuration/Supercell_test.cpp
   ${PROJECT_SOURCE_DIR}/unit/configuration/supercell_name_test.cpp
+  ${PROJECT_SOURCE_DIR}/unit/configuration/group_extension_stress_test.cpp
   ${PROJECT_SOURCE_DIR}/unit/configuration/SupercellSymOp_test.cpp
   ${PROJECT_SOURCE_DIR}/unit/configuration/dof_space_analysis_test.cpp
   ${PROJECT_SOURCE_DIR}/unit/configuration/copy_configuration_test.cpp

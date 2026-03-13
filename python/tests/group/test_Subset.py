@@ -90,8 +90,8 @@ def test_all_subgroups_methods_BCC(BCC_binary_GLstrain_disp_prim, T):
         group=subset_dfs.group, N_translations=subset_dfs.N_translations
     )
 
-    sg_dfs = subset_dfs.all_subgroups(method="depth_first_search", progress="none")
-    sg_ns = subset_ns.all_subgroups(method="normal_subgroup")
+    sg_dfs = subset_dfs.all_subgroups(method="generator_search", progress="none")
+    sg_ns = subset_ns.all_subgroups(method="group_extension")
 
     assert len(sg_dfs) == len(sg_ns)
     assert _subgroup_index_sets(sg_dfs) == _subgroup_index_sets(sg_ns)
@@ -115,8 +115,8 @@ def test_all_subgroups_methods_ZrO(ZrO_prim_GLstrain_disp, T):
         group=subset_dfs.group, N_translations=subset_dfs.N_translations
     )
 
-    sg_dfs = subset_dfs.all_subgroups(method="depth_first_search", progress="none")
-    sg_ns = subset_ns.all_subgroups(method="normal_subgroup")
+    sg_dfs = subset_dfs.all_subgroups(method="generator_search", progress="none")
+    sg_ns = subset_ns.all_subgroups(method="group_extension")
 
     assert len(sg_dfs) == len(sg_ns)
     assert _subgroup_index_sets(sg_dfs) == _subgroup_index_sets(sg_ns)

@@ -1,8 +1,10 @@
 import math
 
 import numpy as np
+import pytest
 
 import libcasm.configuration as config
+import libcasm.xtal as xtal
 
 
 def test_simple_cubic_binary_supercell(simple_cubic_binary_prim):
@@ -188,3 +190,58 @@ def test_supercell_io(simple_cubic_binary_prim):
         print(supercell1)
     out = f.getvalue()
     assert "transformation_matrix_to_super" in out
+
+
+@pytest.mark.parametrize(
+    "lattice_matrix,T",
+    [
+        # Simple cubic, diagonal supercell
+        (
+            np.eye(3),
+            np.diag([2, 2, 2]),
+        ),
+        # Simple cubic, non-diagonal supercell
+        (
+            np.eye(3),
+            np.array([[2, 1, 0], [0, 1, 0], [0, 0, 1]]),
+        ),
+        # FCC primitive lattice, diagonal supercell
+        (
+            np.array([[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]]).T,
+            np.diag([2, 2, 2]),
+        ),
+        # FCC primitive lattice, non-diagonal supercell
+        (
+            np.array([[0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]]).T,
+            np.array([[2, 0, 0], [0, 1, 0], [0, 0, 1]]),
+        ),
+        # BCC primitive lattice, diagonal supercell
+        (
+            np.array([[-0.5, 0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, -0.5]]).T,
+            np.diag([2, 2, 2]),
+        ),
+    ],
+)
+def test_generic_group(lattice_matrix, T):
+    """Test that Supercell.generic_group() gives the same multiplication
+    table as Supercell.symgroup()."""
+    lattice = xtal.Lattice(lattice_matrix)
+    coordinate_frac = np.array([[0.0, 0.0, 0.0]]).T
+    xtal_prim = xtal.Prim(
+        lattice=lattice,
+        coordinate_frac=coordinate_frac,
+        occ_dof=[["A", "B"]],
+        occupants={},
+    )
+    prim = config.Prim(xtal_prim)
+    supercell = config.Supercell(prim, T)
+
+    g = supercell.generic_group()
+    sg = supercell.symgroup()
+
+    assert g.size() == sg.size
+    assert g.multiplication_table == sg.multiplication_table
+
+    g2 = supercell.generic_group_v2()
+    assert g2.size() == sg.size
+    assert g2.multiplication_table == sg.multiplication_table

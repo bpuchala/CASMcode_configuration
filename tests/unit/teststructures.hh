@@ -61,6 +61,8 @@ inline CASM::xtal::BasicStructure ZrO_prim() {
                                   struc.lattice(), FRAC),
                        std::vector<Molecule>{Va, O}));
 
+  struc.set_unique_names({{"Zr"}, {"Zr"}, {"Va", "O"}, {"Va", "O"}});
+
   return struc;
 }
 

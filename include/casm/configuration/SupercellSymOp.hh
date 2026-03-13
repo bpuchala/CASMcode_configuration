@@ -1,6 +1,7 @@
 #ifndef CASM_config_SupercellSymOp
 #define CASM_config_SupercellSymOp
 
+#include <functional>
 #include <iterator>
 
 #include "casm/configuration/definitions.hh"
@@ -273,6 +274,28 @@ std::shared_ptr<SymGroup const> make_symgroup(
 /// \brief Make a SymGroup from a list of SupercellSymOp
 std::shared_ptr<SymGroup const> make_symgroup_v2(
     std::vector<SupercellSymOp> const &group, bool point_group);
+
+/// \brief Multiply and inverse functors for a Supercell's symmetry group
+///
+/// Provides std::function multiply and inverse functors suitable for use with
+/// SubgroupIteratorViaGroupExtension and related algorithms.
+///
+/// Elements are ordered with translations in the inner loop (g = f*N_T + t),
+/// matching SupercellSymOp iteration order.
+///
+/// The functors are safe to use after the SupercellSymOpFunctors object is
+/// moved or copied, as the supercell is held via a shared_ptr.
+struct SupercellSymOpFunctors {
+  Index N_G;
+  Index N_T;
+  std::function<Index(Index, Index)> mult;
+  std::function<Index(Index)> inv;
+
+  Index N_F() const { return N_G / N_T; }
+
+  explicit SupercellSymOpFunctors(
+      std::shared_ptr<Supercell const> const &supercell);
+};
 
 }  // namespace config
 }  // namespace CASM

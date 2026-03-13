@@ -24,6 +24,7 @@
 #include "casm/configuration/config_space_analysis.hh"
 #include "casm/configuration/copy_configuration.hh"
 #include "casm/configuration/dof_space_analysis.hh"
+#include "casm/configuration/group/subgroups.hh"
 #include "casm/configuration/io/json/Configuration_json_io.hh"
 #include "casm/configuration/io/json/Supercell_json_io.hh"
 #include "casm/configuration/io/json/analysis_json_io.hh"
@@ -1145,6 +1146,180 @@ PYBIND11_MODULE(_configuration, m) {
               All combinations of supercell factor group operations and
               unit cell translations within the supercell.
 
+          )pbdoc")
+      .def(
+          "generic_group",
+          [](std::shared_ptr<config::Supercell const> const &supercell) {
+            // Supercell group G = T ⋊ F (translations ⋊ supercell factor group)
+            // Element ordering: k = f * N_T + t
+            // Product: (f1,t1)*(f2,t2) = (f3,t3) where:
+            //   f3 = fg_mult[f1][f2]
+            //   t3 = index(uc(action[f1][t2]) + uc(t1))  [mod supercell]
+            //   action[f][t] = index(R_f * uc(t))  [mod supercell]
+            Index N_F = supercell->sym_info.factor_group->size();
+            Index N_T = supercell->unitcell_index_converter.total_sites();
+            Index n = N_F * N_T;
+
+            // Factor group multiplication table (supercell factor group)
+            auto const &fg_mult =
+                supercell->sym_info.factor_group->multiplication_table;
+
+            // Prim lattice column matrix (for Cartesian <-> fractional)
+            Eigen::Matrix3d const &L =
+                supercell->superlattice.prim_lattice().lat_column_mat();
+            Eigen::Matrix3d L_inv = L.inverse();
+
+            // Precompute uc_of_t[t] for all translations
+            std::vector<xtal::UnitCell> uc_of_t(N_T);
+            for (Index t = 0; t < N_T; ++t) {
+              uc_of_t[t] = supercell->unitcell_index_converter(t);
+            }
+
+            // Precompute action[f][t] = translation index after applying
+            // supercell factor group element f to translation t.
+            // action[f][t] = index(R_frac * uc(t)) [mod supercell]
+            // where R_frac = L^{-1} * R_cart * L (integer matrix).
+            std::vector<std::vector<Index>> action(N_F,
+                                                   std::vector<Index>(N_T));
+            for (Index f = 0; f < N_F; ++f) {
+              Eigen::Matrix3d const &R =
+                  supercell->sym_info.factor_group->element[f].matrix;
+              Eigen::Matrix3l R_frac =
+                  (L_inv * R * L).array().round().cast<long>();
+              for (Index t = 0; t < N_T; ++t) {
+                xtal::UnitCell result_uc{R_frac * uc_of_t[t]};
+                action[f][t] = supercell->unitcell_index_converter(result_uc);
+              }
+            }
+
+            // Build multiplication table: n x n, element index k = f*N_T + t
+            group::MultiplicationTable mult_table(n, std::vector<Index>(n));
+            for (Index f1 = 0; f1 < N_F; ++f1) {
+              for (Index t1 = 0; t1 < N_T; ++t1) {
+                Index i = f1 * N_T + t1;
+                for (Index f2 = 0; f2 < N_F; ++f2) {
+                  Index f3 = fg_mult[f1][f2];
+                  for (Index t2 = 0; t2 < N_T; ++t2) {
+                    Index j = f2 * N_T + t2;
+                    // t3 = index(uc(action[f1][t2]) + uc(t1))
+                    xtal::UnitCell sum_uc{uc_of_t[action[f1][t2]] +
+                                          uc_of_t[t1]};
+                    Index t3 = supercell->unitcell_index_converter(sum_uc);
+                    mult_table[i][j] = f3 * N_T + t3;
+                  }
+                }
+              }
+            }
+
+            return std::make_shared<group::GenericGroup>(std::move(mult_table));
+          },
+          R"pbdoc(
+          Construct the supercell symmetry group as a GenericGroup.
+
+          Uses the semidirect product structure G = T ⋊ F (translations ⋊
+          supercell factor group) to build the multiplication table analytically
+          in O(n²) time, avoiding the O(n³) element-search used by
+          :func:`~libcasm.configuration.Supercell.symgroup`.
+
+          Element ordering: element index ``k = f * N_T + t``, where ``f`` is
+          the supercell factor group index and ``t`` is the translation index.
+          This matches the ordering of
+          :func:`~libcasm.configuration.Supercell.symgroup_rep`.
+
+          Returns
+          -------
+          generic_group: libcasm.group.GenericGroup
+              The supercell symmetry group, containing all combinations of
+              supercell factor group operations and unit cell translations
+              within the supercell.
+          )pbdoc")
+      .def(
+          "generic_group_v2",
+          [](std::shared_ptr<config::Supercell const> const &supercell) {
+            // Build the supercell symmetry group multiplication table using
+            // SupercellSymOp::operator* for each pair.  O(n^2) operations,
+            // each involving a floating-point SymOp product.
+            //
+            // Element ordering: k = f * N_T + t  (matches symgroup_rep)
+            Index N_F = supercell->sym_info.factor_group->size();
+            Index N_T = supercell->unitcell_index_converter.total_sites();
+            Index n = N_F * N_T;
+
+            // Enumerate all SupercellSymOp elements in iteration order
+            std::vector<config::SupercellSymOp> elements;
+            elements.reserve(n);
+            auto it = config::SupercellSymOp::begin(supercell);
+            auto end = config::SupercellSymOp::end(supercell);
+            while (it != end) {
+              elements.push_back(*it);
+              ++it;
+            }
+
+            // Build multiplication table using operator*
+            group::MultiplicationTable mult_table(n, std::vector<Index>(n));
+            for (Index i = 0; i < n; ++i) {
+              for (Index j = 0; j < n; ++j) {
+                auto product = elements[i] * elements[j];
+                Index f3 = product.supercell_factor_group_index();
+                Index t3 = product.translation_index();
+                mult_table[i][j] = f3 * N_T + t3;
+              }
+            }
+
+            return std::make_shared<group::GenericGroup>(std::move(mult_table));
+          },
+          R"pbdoc(
+          Construct the supercell symmetry group as a GenericGroup (v2).
+
+          Uses :class:`~libcasm.configuration.SupercellSymOp` products to build
+          the multiplication table analytically in O(n²) time. Each product
+          uses :meth:`SupercellSymOp.to_symop` internally (floating-point).
+          Compare with :func:`~libcasm.configuration.Supercell.generic_group`,
+          which uses a precomputed integer action table.
+
+          Returns
+          -------
+          generic_group: libcasm.group.GenericGroup
+              The supercell symmetry group, containing all combinations of
+              supercell factor group operations and unit cell translations
+              within the supercell.
+          )pbdoc")
+      .def(
+          "_all_subgroups_via_group_extension_iteration",
+          [](std::shared_ptr<config::Supercell const> const &supercell,
+             bool canonical_only, Index n_subtrees) {
+            config::SupercellSymOpFunctors functors(supercell);
+            group::SubgroupIteratorViaGroupExtension it(
+                functors.N_G, functors.N_T, functors.mult, functors.inv,
+                canonical_only, n_subtrees);
+            std::vector<std::set<Index>> result;
+            while (!it.done()) {
+              result.push_back(it.value());
+              it.next();
+            }
+            return result;
+          },
+          py::arg("canonical_only") = false, py::arg("n_subtrees") = 1,
+          R"pbdoc(
+          Find all subgroups of the supercell symmetry group using
+          SubgroupIteratorViaGroupExtension.
+
+          This is a private testing method. Element ordering matches
+          :func:`~libcasm.configuration.Supercell.generic_group` (k = f*N_T + t).
+
+          Parameters
+          ----------
+          canonical_only : bool, default=False
+              If True, only yield the lexicographically largest representative
+              from each conjugacy orbit of subgroups.
+          n_subtrees : int, default=1
+              Number of subtrees used internally when finding subgroups of T
+              and F.
+
+          Returns
+          -------
+          subgroups : list[set[int]]
+              Each element is a set of element indices (in G) forming a subgroup.
           )pbdoc")
       .def(
           "symgroup_rep",

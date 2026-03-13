@@ -22,14 +22,14 @@ def _subset_all_subgroups(
     self,
     n_subtrees: int = 100,
     progress: typing.Union[str, typing.Callable] = "alive",
-    method: str = "depth_first_search",
+    method: str = "generator_search",
 ):
     """Return all subgroups of this subset
 
     Notes
     -----
 
-    The "depth_first_search" method:
+    The "generator_search" method (deprecated alias: "generator_search"):
 
     1. Finds all cyclic subgroups and stores the elements which generate unique
        cyclic subgroups as the candidate generators.
@@ -53,22 +53,26 @@ def _subset_all_subgroups(
     the actual time remaining, because the initial subtrees are likely to be among the
     longest to search.
 
-    The "normal_subgroup" method exploits the group extension structure G = T.F,
-    where T = {0,...,N_translations-1} is the normal translation subgroup and
-    F = G/T is the quotient. It enumerates all valid sections ξ: K → T/S for each
-    pair (K ≤ F, S ≤ T) with K normalizing S, and closes the corresponding
-    generators in G. This finds all subgroups for both symmorphic and non-symmorphic
-    groups, and is faster for large supercell groups. Requires ``N_translations``
-    to be set on the Subset.
+    The "group_extension" method (deprecated alias: "normal_subgroup") exploits the
+    group extension structure G = T.F, where T = {0,...,N_translations-1} is the
+    normal translation subgroup and F = G/T is the quotient. It enumerates all valid
+    sections ξ: K → T/S for each pair (K ≤ F, S ≤ T) with K normalizing S, and
+    closes the corresponding generators in G. This finds all subgroups for both
+    symmorphic and non-symmorphic groups, and is faster for large supercell groups.
+    Requires ``N_translations`` to be set on the Subset.
+
+    The "cyclic_join" method iteratively joins cyclic subgroups until all subgroups
+    have been found. This is an older, simpler algorithm that is less efficient for
+    large groups.
 
     Parameters
     ----------
     n_subtrees: int = 100
         The number of subtrees to divide the search tree into (used by
-        method="depth_first_search" only).
+        method="generator_search" only).
     progress: Union[str, Callable] = "alive"
         Indicates the type of progress reporting to use (used by
-        method="depth_first_search" only). The options are:
+        method="generator_search" only). The options are:
 
         - "alive" (default): a live progress bar is shown.
         - "plain": use the default C++ stdout progress reporting.
@@ -83,23 +87,33 @@ def _subset_all_subgroups(
 
             def progress_f(n_subtrees_completed: int, subgroups_size: int) -> None:
 
-    method: str = "depth_first_search"
+    method: str = "generator_search"
         Which algorithm to use:
 
-        - "depth_first_search" (default): multithreaded depth-first search
-          over generator combinations. General purpose.
-        - "normal_subgroup": exploits the G = T.F extension structure.
-          Requires ``N_translations`` to be set on the Subset.
+        - "generator_search" (default): multithreaded depth-first search
+          over generator combinations. General purpose. Deprecated alias:
+          "generator_search".
+        - "group_extension": exploits the G = T.F extension structure.
+          Requires ``N_translations`` to be set on the Subset. Deprecated
+          alias: "normal_subgroup".
+        - "cyclic_join": iteratively joins cyclic subgroups (older, simpler
+          algorithm; less efficient for large groups).
 
     Returns
     -------
     subgroups: list[Subset]
         The subgroups.
     """
-    if method == "normal_subgroup":
-        return Subset._all_subgroups(self, method="normal_subgroup")
+    if method in ("group_extension", "normal_subgroup", "cyclic_join"):
+        return Subset._all_subgroups(self, method=method)
 
-    # method == "depth_first_search"
+    # method == "generator_search" or "generator_search"
+    if method not in ("generator_search", "generator_search"):
+        raise ValueError(
+            f"all_subgroups: unknown method '{method}'. "
+            "Valid options: 'generator_search', 'group_extension', 'cyclic_join'."
+        )
+
     if Subset._has_all_subgroups(self):
         return Subset._all_subgroups(self)
 
@@ -129,7 +143,7 @@ def _subset_all_subgroups(
                 bar(n_finished_tasks / n_subtrees)
 
             subgroups = Subset._all_subgroups(
-                self, n_subtrees, "depth_first_search", progress_callback
+                self, n_subtrees, "generator_search", progress_callback
             )
 
     else:
@@ -151,7 +165,7 @@ def _subset_all_subgroups(
             raise ValueError("progress must be 'alive', 'plain', 'none', or a callable")
 
         subgroups = Subset._all_subgroups(
-            self, n_subtrees, "depth_first_search", progress
+            self, n_subtrees, "generator_search", progress
         )
 
         if progress is None:
